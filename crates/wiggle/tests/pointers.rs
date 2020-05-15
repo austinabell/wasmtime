@@ -1,5 +1,5 @@
 use proptest::prelude::*;
-use wiggle::{GuestMemory, GuestPtr};
+use wiggle::{GuestPtr, MemoryManager};
 use wiggle_test::{impl_errno, HostMemory, MemArea, WasiCtx};
 
 wiggle::from_witx!({
@@ -127,31 +127,32 @@ impl PointersAndEnumsExercise {
     }
     pub fn test(&self) {
         let ctx = WasiCtx::new();
-        let host_memory = HostMemory::new();
+        let mut host_memory = HostMemory::new();
+        let mem_manager = MemoryManager::new(&mut host_memory);
 
-        host_memory
+        mem_manager
             .ptr(self.input2_loc.ptr)
             .write(self.input2)
             .expect("input2 ref_mut");
 
-        host_memory
+        mem_manager
             .ptr(self.input3_loc.ptr)
             .write(self.input3)
             .expect("input3 ref_mut");
 
-        host_memory
+        mem_manager
             .ptr(self.input4_loc.ptr)
             .write(self.input4)
             .expect("input4 ref_mut");
 
-        host_memory
+        mem_manager
             .ptr(self.input4_ptr_loc.ptr)
             .write(self.input4_loc.ptr)
             .expect("input4 ptr ref_mut");
 
         let e = pointers::pointers_and_enums(
             &ctx,
-            &host_memory,
+            &mem_manager,
             self.input1.into(),
             self.input2_loc.ptr as i32,
             self.input3_loc.ptr as i32,
@@ -160,7 +161,7 @@ impl PointersAndEnumsExercise {
         assert_eq!(e, types::Errno::Ok.into(), "errno");
 
         // Implementation of pointers_and_enums writes input3 to the input2_loc:
-        let written_to_input2_loc: i32 = host_memory
+        let written_to_input2_loc: i32 = mem_manager
             .ptr(self.input2_loc.ptr)
             .read()
             .expect("input2 ref");
@@ -172,7 +173,7 @@ impl PointersAndEnumsExercise {
         );
 
         // Implementation of pointers_and_enums writes input2_loc to input4_ptr_loc:
-        let written_to_input4_ptr: u32 = host_memory
+        let written_to_input4_ptr: u32 = mem_manager
             .ptr(self.input4_ptr_loc.ptr)
             .read()
             .expect("input4_ptr_loc ref");

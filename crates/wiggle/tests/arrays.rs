@@ -1,5 +1,5 @@
 use proptest::prelude::*;
-use wiggle::{GuestMemory, GuestPtr};
+use wiggle::{GuestPtr, MemoryManager};
 use wiggle_test::{impl_errno, HostMemory, MemArea, WasiCtx};
 
 wiggle::from_witx!({
@@ -77,10 +77,11 @@ impl ReduceExcusesExcercise {
     pub fn test(&self) {
         let mut ctx = WasiCtx::new();
         let mut host_memory = HostMemory::new();
+        let mem_manager = MemoryManager::new(&mut host_memory);
 
         // Populate memory with pointers to generated Excuse values
         for (&excuse, ptr) in self.excuse_values.iter().zip(self.excuse_ptr_locs.iter()) {
-            host_memory
+            mem_manager
                 .ptr(ptr.ptr)
                 .write(excuse)
                 .expect("deref ptr mut to Excuse value");
@@ -89,17 +90,17 @@ impl ReduceExcusesExcercise {
         // Populate the array with pointers to generated Excuse values
         {
             let array: GuestPtr<'_, [GuestPtr<types::Excuse>]> =
-                host_memory.ptr((self.array_ptr_loc.ptr, self.excuse_ptr_locs.len() as u32));
+                mem_manager.ptr((self.array_ptr_loc.ptr, self.excuse_ptr_locs.len() as u32));
             for (slot, ptr) in array.iter().zip(&self.excuse_ptr_locs) {
                 let slot = slot.expect("array should be in bounds");
-                slot.write(host_memory.ptr(ptr.ptr))
+                slot.write(mem_manager.ptr(ptr.ptr))
                     .expect("should succeed in writing array");
             }
         }
 
         let res = arrays::reduce_excuses(
             &mut ctx,
-            &mut host_memory,
+            &mem_manager,
             self.array_ptr_loc.ptr as i32,
             self.excuse_ptr_locs.len() as i32,
             self.return_ptr_loc.ptr as i32,
@@ -111,7 +112,7 @@ impl ReduceExcusesExcercise {
             .excuse_values
             .last()
             .expect("generated vec of excuses should be non-empty");
-        let given: types::Excuse = host_memory
+        let given: types::Excuse = mem_manager
             .ptr(self.return_ptr_loc.ptr)
             .read()
             .expect("deref ptr to returned value");
@@ -164,29 +165,30 @@ impl PopulateExcusesExcercise {
 
     pub fn test(&self) {
         let ctx = WasiCtx::new();
-        let host_memory = HostMemory::new();
+        let mut host_memory = HostMemory::new();
+        let mem_manager = MemoryManager::new(&mut host_memory);
 
         // Populate array with valid pointers to Excuse type in memory
-        let ptr = host_memory.ptr::<[GuestPtr<'_, types::Excuse>]>((
+        let ptr = mem_manager.ptr::<[GuestPtr<'_, types::Excuse>]>((
             self.array_ptr_loc.ptr,
             self.elements.len() as u32,
         ));
         for (ptr, val) in ptr.iter().zip(&self.elements) {
             ptr.expect("should be valid pointer")
-                .write(host_memory.ptr(val.ptr))
+                .write(mem_manager.ptr(val.ptr))
                 .expect("failed to write value");
         }
 
         let res = arrays::populate_excuses(
             &ctx,
-            &host_memory,
+            &mem_manager,
             self.array_ptr_loc.ptr as i32,
             self.elements.len() as i32,
         );
         assert_eq!(res, types::Errno::Ok.into(), "populate excuses errno");
 
         let arr: GuestPtr<'_, [GuestPtr<'_, types::Excuse>]> =
-            host_memory.ptr((self.array_ptr_loc.ptr, self.elements.len() as u32));
+            mem_manager.ptr((self.array_ptr_loc.ptr, self.elements.len() as u32));
         for el in arr.iter() {
             let ptr_to_ptr = el
                 .expect("valid ptr to ptr")

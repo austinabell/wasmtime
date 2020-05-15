@@ -1,5 +1,5 @@
 use proptest::prelude::*;
-use wiggle::{GuestMemory, GuestType};
+use wiggle::{GuestType, MemoryManager};
 use wiggle_test::{impl_errno, HostMemory, MemArea, WasiCtx};
 
 const FD_VAL: u32 = 123;
@@ -33,24 +33,25 @@ struct HandleExercise {
 impl HandleExercise {
     pub fn test(&self) {
         let ctx = WasiCtx::new();
-        let host_memory = HostMemory::new();
+        let mut host_memory = HostMemory::new();
+        let mem_manager = MemoryManager::new(&mut host_memory);
 
-        let e = handle_examples::fd_create(&ctx, &host_memory, self.return_loc.ptr as i32);
+        let e = handle_examples::fd_create(&ctx, &mem_manager, self.return_loc.ptr as i32);
 
         assert_eq!(e, types::Errno::Ok.into(), "fd_create error");
 
-        let h_got: u32 = host_memory
+        let h_got: u32 = mem_manager
             .ptr(self.return_loc.ptr)
             .read()
             .expect("return ref_mut");
 
         assert_eq!(h_got, 123, "fd_create return val");
 
-        let e = handle_examples::fd_consume(&ctx, &host_memory, h_got as i32);
+        let e = handle_examples::fd_consume(&ctx, &mem_manager, h_got as i32);
 
         assert_eq!(e, types::Errno::Ok.into(), "fd_consume error");
 
-        let e = handle_examples::fd_consume(&ctx, &host_memory, h_got as i32 + 1);
+        let e = handle_examples::fd_consume(&ctx, &mem_manager, h_got as i32 + 1);
 
         assert_eq!(
             e,

@@ -1,5 +1,5 @@
 use proptest::prelude::*;
-use wiggle::GuestMemory;
+use wiggle::MemoryManager;
 use wiggle_test::{impl_errno, HostMemory, MemArea, WasiCtx};
 
 wiggle::from_witx!({
@@ -30,9 +30,10 @@ struct IntFloatExercise {
 impl IntFloatExercise {
     pub fn test(&self) {
         let ctx = WasiCtx::new();
-        let host_memory = HostMemory::new();
+        let mut host_memory = HostMemory::new();
+        let mem_manager = MemoryManager::new(&mut host_memory);
 
-        let e = atoms::int_float_args(&ctx, &host_memory, self.an_int as i32, self.an_float);
+        let e = atoms::int_float_args(&ctx, &mem_manager, self.an_int as i32, self.an_float);
 
         assert_eq!(e, types::Errno::Ok.into(), "int_float_args error");
     }
@@ -59,16 +60,17 @@ struct DoubleIntExercise {
 impl DoubleIntExercise {
     pub fn test(&self) {
         let ctx = WasiCtx::new();
-        let host_memory = HostMemory::new();
+        let mut host_memory = HostMemory::new();
+        let mem_manager = MemoryManager::new(&mut host_memory);
 
         let e = atoms::double_int_return_float(
             &ctx,
-            &host_memory,
+            &mem_manager,
             self.input as i32,
             self.return_loc.ptr as i32,
         );
 
-        let return_val = host_memory
+        let return_val = mem_manager
             .ptr::<types::AliasToFloat>(self.return_loc.ptr)
             .read()
             .expect("failed to read return");

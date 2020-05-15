@@ -74,7 +74,7 @@ macro_rules! primitives {
                 // size of our type as well as properly aligned. Consequently we
                 // should be able to safely ready the pointer just after we
                 // validated it, returning it along here.
-                let host_ptr = ptr.mem().validate_size_align(
+                let host_ptr = ptr.mem.validate_size_align(
                     ptr.offset(),
                     Self::guest_align(),
                     Self::guest_size(),
@@ -84,7 +84,7 @@ macro_rules! primitives {
 
             #[inline]
             fn write(ptr: &GuestPtr<'_, Self>, val: Self) -> Result<(), GuestError> {
-                let host_ptr = ptr.mem().validate_size_align(
+                let host_ptr = ptr.mem.validate_size_align(
                     ptr.offset(),
                     Self::guest_align(),
                     Self::guest_size(),
@@ -131,7 +131,7 @@ impl<'a, T> GuestType<'a> for GuestPtr<'a, T> {
 
     fn read(ptr: &GuestPtr<'a, Self>) -> Result<Self, GuestError> {
         let offset = ptr.cast::<u32>().read()?;
-        Ok(GuestPtr::new(ptr.mem(), offset))
+        Ok(GuestPtr::new(ptr.mem, offset))
     }
 
     fn write(ptr: &GuestPtr<'_, Self>, val: Self) -> Result<(), GuestError> {

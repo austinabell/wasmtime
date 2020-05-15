@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::marker;
 use std::rc::Rc;
@@ -16,7 +16,7 @@ mod error;
 mod guest_type;
 mod region;
 
-pub use borrow::GuestBorrows;
+use borrow::{BorrowChecker, BorrowHandle};
 pub use error::GuestError;
 pub use guest_type::{GuestErrorType, GuestType, GuestTypeTransparent};
 pub use region::Region;
@@ -95,68 +95,6 @@ pub unsafe trait GuestMemory {
     /// implementations must uphold, and for more details see the
     /// [`GuestMemory`] documentation.
     fn base(&self) -> (*mut u8, u32);
-
-    /// Validates a guest-relative pointer given various attributes, and returns
-    /// the corresponding host pointer.
-    ///
-    /// * `offset` - this is the guest-relative pointer, an offset from the
-    ///   base.
-    /// * `align` - this is the desired alignment of the guest pointer, and if
-    ///   successful the host pointer will be guaranteed to have this alignment.
-    /// * `len` - this is the number of bytes, after `offset`, that the returned
-    ///   pointer must be valid for.
-    ///
-    /// This function will guarantee that the returned pointer is in-bounds of
-    /// `base`, *at this time*, for `len` bytes and has alignment `align`. If
-    /// any guarantees are not upheld then an error will be returned.
-    ///
-    /// Note that the returned pointer is an unsafe pointer. This is not safe to
-    /// use in general because guest memory can be relocated. Additionally the
-    /// guest may be modifying/reading memory as well. Consult the
-    /// [`GuestMemory`] documentation for safety information about using this
-    /// returned pointer.
-    fn validate_size_align(
-        &self,
-        offset: u32,
-        align: usize,
-        len: u32,
-    ) -> Result<*mut u8, GuestError> {
-        let (base_ptr, base_len) = self.base();
-        let region = Region { start: offset, len };
-
-        // Figure out our pointer to the start of memory
-        let start = match (base_ptr as usize).checked_add(offset as usize) {
-            Some(ptr) => ptr,
-            None => return Err(GuestError::PtrOverflow),
-        };
-        // and use that to figure out the end pointer
-        let end = match start.checked_add(len as usize) {
-            Some(ptr) => ptr,
-            None => return Err(GuestError::PtrOverflow),
-        };
-        // and then verify that our end doesn't reach past the end of our memory
-        if end > (base_ptr as usize) + (base_len as usize) {
-            return Err(GuestError::PtrOutOfBounds(region));
-        }
-        // and finally verify that the alignment is correct
-        if start % align != 0 {
-            return Err(GuestError::PtrNotAligned(region, align as u32));
-        }
-        Ok(start as *mut u8)
-    }
-
-    /// Convenience method for creating a `GuestPtr` at a particular offset.
-    ///
-    /// Note that `T` can be almost any type, and typically `offset` is a `u32`.
-    /// The exception is slices and strings, in which case `offset` is a `(u32,
-    /// u32)` of `(offset, length)`.
-    fn ptr<'a, T>(&'a self, offset: T::Pointer) -> GuestPtr<'a, T>
-    where
-        Self: Sized,
-        T: ?Sized + Pointee,
-    {
-        GuestPtr::new(self, offset)
-    }
 }
 
 // Forwarding trait implementations to the original type
@@ -188,6 +126,139 @@ unsafe impl<T: ?Sized + GuestMemory> GuestMemory for Rc<T> {
 unsafe impl<T: ?Sized + GuestMemory> GuestMemory for Arc<T> {
     fn base(&self) -> (*mut u8, u32) {
         T::base(self)
+    }
+}
+
+pub struct MemoryManager<'a> {
+    mem: &'a (dyn GuestMemory + 'a),
+    bc: RefCell<BorrowChecker>,
+}
+
+impl<'a> MemoryManager<'a> {
+    pub fn new(mem: &'a mut (dyn GuestMemory + 'a)) -> Self {
+        let bc = RefCell::new(BorrowChecker::new());
+        Self { mem, bc }
+    }
+    /// Validates a guest-relative pointer given various attributes, and returns
+    /// the corresponding host pointer.
+    ///
+    /// * `offset` - this is the guest-relative pointer, an offset from the
+    ///   base.
+    /// * `align` - this is the desired alignment of the guest pointer, and if
+    ///   successful the host pointer will be guaranteed to have this alignment.
+    /// * `len` - this is the number of bytes, after `offset`, that the returned
+    ///   pointer must be valid for.
+    ///
+    /// This function will guarantee that the returned pointer is in-bounds of
+    /// `base`, *at this time*, for `len` bytes and has alignment `align`. If
+    /// any guarantees are not upheld then an error will be returned.
+    ///
+    /// Note that the returned pointer is an unsafe pointer. This is not safe to
+    /// use in general because guest memory can be relocated. Additionally the
+    /// guest may be modifying/reading memory as well. Consult the
+    /// [`GuestMemory`] documentation for safety information about using this
+    /// returned pointer.
+    pub fn validate_size_align(
+        &self,
+        offset: u32,
+        align: usize,
+        len: u32,
+    ) -> Result<*mut u8, GuestError> {
+        let (base_ptr, base_len) = self.mem.base();
+        let region = Region { start: offset, len };
+
+        // Figure out our pointer to the start of memory
+        let start = match (base_ptr as usize).checked_add(offset as usize) {
+            Some(ptr) => ptr,
+            None => return Err(GuestError::PtrOverflow),
+        };
+        // and use that to figure out the end pointer
+        let end = match start.checked_add(len as usize) {
+            Some(ptr) => ptr,
+            None => return Err(GuestError::PtrOverflow),
+        };
+        // and then verify that our end doesn't reach past the end of our memory
+        if end > (base_ptr as usize) + (base_len as usize) {
+            return Err(GuestError::PtrOutOfBounds(region));
+        }
+        // and finally verify that the alignment is correct
+        if start % align != 0 {
+            return Err(GuestError::PtrNotAligned(region, align as u32));
+        }
+        Ok(start as *mut u8)
+    }
+
+    /// Convenience method for creating a `GuestPtr` at a particular offset.
+    ///
+    /// Note that `T` can be almost any type, and typically `offset` is a `u32`.
+    /// The exception is slices and strings, in which case `offset` is a `(u32,
+    /// u32)` of `(offset, length)`.
+    pub fn ptr<T>(&'a self, offset: T::Pointer) -> GuestPtr<'a, T>
+    where
+        Self: Sized,
+        T: ?Sized + Pointee,
+    {
+        GuestPtr::new(self, offset)
+    }
+
+    pub fn borrow(&self, r: Region) -> Result<BorrowHandle, GuestError> {
+        self.bc
+            .borrow_mut()
+            .borrow(r)
+            .ok_or_else(|| GuestError::PtrBorrowed(r))
+    }
+    pub fn unborrow(&self, h: BorrowHandle) {
+        self.bc.borrow_mut().unborrow(h)
+    }
+}
+
+pub struct GuestSlice<'a, T> {
+    ptr: *mut [T],
+    mem: &'a MemoryManager<'a>,
+    borrow: BorrowHandle,
+}
+
+impl<'a, T> std::ops::Deref for GuestSlice<'a, T> {
+    type Target = [T];
+    fn deref(&self) -> &Self::Target {
+        unsafe { self.ptr.as_ref().expect("ptr guaranteed to be non-null") }
+    }
+}
+
+impl<'a, T> std::ops::DerefMut for GuestSlice<'a, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { self.ptr.as_mut().expect("ptr guaranteed to be non-null") }
+    }
+}
+
+impl<'a, T> Drop for GuestSlice<'a, T> {
+    fn drop(&mut self) {
+        self.mem.unborrow(self.borrow)
+    }
+}
+
+pub struct GuestStr<'a> {
+    ptr: *mut str,
+    mem: &'a MemoryManager<'a>,
+    borrow: BorrowHandle,
+}
+
+impl<'a> std::ops::Deref for GuestStr<'a> {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        unsafe { self.ptr.as_ref().expect("ptr guaranteed to be non-null") }
+    }
+}
+
+impl<'a> std::ops::DerefMut for GuestStr<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { self.ptr.as_mut().expect("ptr guaranteed to be non-null") }
+    }
+}
+
+impl<'a> Drop for GuestStr<'a> {
+    fn drop(&mut self) {
+        self.mem.unborrow(self.borrow)
     }
 }
 
@@ -236,7 +307,7 @@ unsafe impl<T: ?Sized + GuestMemory> GuestMemory for Arc<T> {
 /// when working with a `GuestPtr` if you're not using one of the
 /// already-attached helper methods.
 pub struct GuestPtr<'a, T: ?Sized + Pointee> {
-    mem: &'a (dyn GuestMemory + 'a),
+    mem: &'a MemoryManager<'a>,
     pointer: T::Pointer,
     _marker: marker::PhantomData<&'a Cell<T>>,
 }
@@ -247,7 +318,7 @@ impl<'a, T: ?Sized + Pointee> GuestPtr<'a, T> {
     /// Note that for sized types like `u32`, `GuestPtr<T>`, etc, the `pointer`
     /// vlue is a `u32` offset into guest memory. For slices and strings,
     /// `pointer` is a `(u32, u32)` offset/length pair.
-    pub fn new(mem: &'a (dyn GuestMemory + 'a), pointer: T::Pointer) -> GuestPtr<'_, T> {
+    pub fn new(mem: &'a MemoryManager<'a>, pointer: T::Pointer) -> GuestPtr<'_, T> {
         GuestPtr {
             mem,
             pointer,
@@ -261,11 +332,6 @@ impl<'a, T: ?Sized + Pointee> GuestPtr<'a, T> {
     /// strings it returns a `(u32, u32)` pointer/length pair.
     pub fn offset(&self) -> T::Pointer {
         self.pointer
-    }
-
-    /// Returns the guest memory that this pointer is coming from.
-    pub fn mem(&self) -> &'a (dyn GuestMemory + 'a) {
-        self.mem
     }
 
     /// Casts this `GuestPtr` type to a different type.
@@ -403,7 +469,7 @@ impl<'a, T> GuestPtr<'a, [T]> {
     /// For safety against overlapping mutable borrows, the user must use the
     /// same `GuestBorrows` to create all `*mut str` or `*mut [T]` that are alive
     /// at the same time.
-    pub fn as_raw(&self, bc: &mut GuestBorrows) -> Result<*mut [T], GuestError>
+    pub fn as_slice(&self) -> Result<GuestSlice<'a, T>, GuestError>
     where
         T: GuestTypeTransparent<'a>,
     {
@@ -415,7 +481,7 @@ impl<'a, T> GuestPtr<'a, [T]> {
             self.mem
                 .validate_size_align(self.pointer.0, T::guest_align(), len)? as *mut T;
 
-        bc.borrow(Region {
+        let borrow = self.mem.borrow(Region {
             start: self.pointer.0,
             len,
         })?;
@@ -428,10 +494,16 @@ impl<'a, T> GuestPtr<'a, [T]> {
 
         // SAFETY: iff there are no overlapping borrows (all uses of as_raw use this same
         // GuestBorrows), its valid to construct a *mut [T]
-        unsafe {
+        let ptr = unsafe {
             let s = slice::from_raw_parts_mut(ptr, self.pointer.1 as usize);
-            Ok(s as *mut [T])
-        }
+            s as *mut [T]
+        };
+
+        Ok(GuestSlice {
+            ptr,
+            mem: self.mem,
+            borrow,
+        })
     }
 
     /// Copies the data pointed to by `slice` into this guest region.
@@ -451,16 +523,14 @@ impl<'a, T> GuestPtr<'a, [T]> {
         T: GuestTypeTransparent<'a> + Copy,
     {
         // bounds check ...
-        let raw = self.as_raw(&mut GuestBorrows::new())?;
-        unsafe {
-            // ... length check ...
-            if (*raw).len() != slice.len() {
-                return Err(GuestError::SliceLengthsDiffer);
-            }
-            // ... and copy!
-            (*raw).copy_from_slice(slice);
-            Ok(())
+        let mut raw = self.as_slice()?;
+        // ... length check ...
+        if raw.len() != slice.len() {
+            return Err(GuestError::SliceLengthsDiffer);
         }
+        // ... and copy!
+        raw.copy_from_slice(slice);
+        Ok(())
     }
 
     /// Returns a `GuestPtr` pointing to the base of the array for the interior
@@ -505,24 +575,26 @@ impl<'a> GuestPtr<'a, str> {
     /// For safety against overlapping mutable borrows, the user must use the
     /// same `GuestBorrows` to create all `*mut str` or `*mut [T]` that are
     /// alive at the same time.
-    pub fn as_raw(&self, bc: &mut GuestBorrows) -> Result<*mut str, GuestError> {
+    pub fn as_str(&self) -> Result<GuestStr<'a>, GuestError> {
         let ptr = self
             .mem
             .validate_size_align(self.pointer.0, 1, self.pointer.1)?;
 
-        bc.borrow(Region {
+        let borrow = self.mem.borrow(Region {
             start: self.pointer.0,
             len: self.pointer.1,
         })?;
 
         // SAFETY: iff there are no overlapping borrows (all uses of as_raw use this same
         // GuestBorrows), its valid to construct a *mut str
-        unsafe {
-            let s = slice::from_raw_parts_mut(ptr, self.pointer.1 as usize);
-            match str::from_utf8_mut(s) {
-                Ok(s) => Ok(s),
-                Err(e) => Err(GuestError::InvalidUtf8(e)),
-            }
+        let ptr = unsafe { slice::from_raw_parts_mut(ptr, self.pointer.1 as usize) };
+        match str::from_utf8_mut(ptr) {
+            Ok(ptr) => Ok(GuestStr {
+                ptr,
+                mem: self.mem,
+                borrow,
+            }),
+            Err(e) => Err(GuestError::InvalidUtf8(e)),
         }
     }
 }

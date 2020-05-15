@@ -1,5 +1,5 @@
 use proptest::prelude::*;
-use wiggle::{GuestMemory, GuestType};
+use wiggle::{GuestType, MemoryManager};
 use wiggle_test::{impl_errno, HostMemory, MemArea, WasiCtx};
 
 wiggle::from_witx!({
@@ -106,21 +106,22 @@ impl GetTagExercise {
 
     pub fn test(&self) {
         let ctx = WasiCtx::new();
-        let host_memory = HostMemory::new();
+        let mut host_memory = HostMemory::new();
+        let mem_manager = MemoryManager::new(&mut host_memory);
 
         let discriminant: u8 = reason_tag(&self.input).into();
-        host_memory
+        mem_manager
             .ptr(self.input_loc.ptr)
             .write(discriminant)
             .expect("input discriminant ptr");
         match self.input {
             types::Reason::DogAte(f) => {
-                host_memory
+                mem_manager
                     .ptr(self.input_loc.ptr + 4)
                     .write(f)
                     .expect("input contents ref_mut");
             }
-            types::Reason::Traffic(v) => host_memory
+            types::Reason::Traffic(v) => mem_manager
                 .ptr(self.input_loc.ptr + 4)
                 .write(v)
                 .expect("input contents ref_mut"),
@@ -128,14 +129,14 @@ impl GetTagExercise {
         }
         let e = union_example::get_tag(
             &ctx,
-            &host_memory,
+            &mem_manager,
             self.input_loc.ptr as i32,
             self.return_loc.ptr as i32,
         );
 
         assert_eq!(e, types::Errno::Ok.into(), "get_tag errno");
 
-        let return_val: types::Excuse = host_memory
+        let return_val: types::Excuse = mem_manager
             .ptr(self.return_loc.ptr)
             .read()
             .expect("return ref");
@@ -183,27 +184,28 @@ impl ReasonMultExercise {
 
     pub fn test(&self) {
         let ctx = WasiCtx::new();
-        let host_memory = HostMemory::new();
+        let mut host_memory = HostMemory::new();
+        let mem_manager = MemoryManager::new(&mut host_memory);
 
         let discriminant: u8 = reason_tag(&self.input).into();
-        host_memory
+        mem_manager
             .ptr(self.input_loc.ptr)
             .write(discriminant)
             .expect("input discriminant ref_mut");
-        host_memory
+        mem_manager
             .ptr(self.input_loc.ptr + 4)
             .write(self.input_pointee_loc.ptr)
             .expect("input pointer ref_mut");
 
         match self.input {
             types::Reason::DogAte(f) => {
-                host_memory
+                mem_manager
                     .ptr(self.input_pointee_loc.ptr)
                     .write(f)
                     .expect("input contents ref_mut");
             }
             types::Reason::Traffic(v) => {
-                host_memory
+                mem_manager
                     .ptr(self.input_pointee_loc.ptr)
                     .write(v)
                     .expect("input contents ref_mut");
@@ -212,7 +214,7 @@ impl ReasonMultExercise {
         }
         let e = union_example::reason_mult(
             &ctx,
-            &host_memory,
+            &mem_manager,
             self.input_loc.ptr as i32,
             self.multiply_by as i32,
         );
@@ -221,7 +223,7 @@ impl ReasonMultExercise {
 
         match self.input {
             types::Reason::DogAte(f) => {
-                let f_result: f32 = host_memory
+                let f_result: f32 = mem_manager
                     .ptr(self.input_pointee_loc.ptr)
                     .read()
                     .expect("input contents ref_mut");
@@ -232,7 +234,7 @@ impl ReasonMultExercise {
                 )
             }
             types::Reason::Traffic(v) => {
-                let v_result: i32 = host_memory
+                let v_result: i32 = mem_manager
                     .ptr(self.input_pointee_loc.ptr)
                     .read()
                     .expect("input contents ref_mut");
